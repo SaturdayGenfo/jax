@@ -39,6 +39,7 @@ from scipy.linalg.cython_lapack cimport spotrf, dpotrf, cpotrf, zpotrf
 from scipy.linalg.cython_lapack cimport sgesdd, dgesdd, cgesdd, zgesdd
 from scipy.linalg.cython_lapack cimport ssyevd, dsyevd, cheevd, zheevd
 from scipy.linalg.cython_lapack cimport sgeev, dgeev, cgeev, zgeev
+from scipy.linalg.cython_lapack cimport sgees, dgees, cgees, zgees
 
 import numpy as np
 from jaxlib import xla_client
@@ -1812,3 +1813,106 @@ def geev(c, a, jobvl=True, jobvr=True):
   else:
     return (_ops.GetTupleElement(out, 2), _ops.GetTupleElement(out, 3),
             _ops.GetTupleElement(out, 4), _ops.GetTupleElement(out, 5))
+
+
+# gees: Schur factorization
+
+cdef void lapack_sgees(void* out_tuple, void** data) nogil:
+  cdef int b = (<int32_t*>(data[0]))[0]
+  cdef int n = (<int32_t*>(data[1]))[0] 
+  cdef char jobvs = (<uint8_t*>(data[2]))[0]
+  cdef char sort = (<uint8_t*>(data[3]))[0]
+
+  cdef const float* a_in = <float*>(data[4])
+
+  cdef void** out = <void**>(out_tuple)
+  cdef float* a_work = <float*>(out[0])
+
+  
+  cdef float* wr_out = <float*>(out[1])
+  cdef float* wi_out = <float*>(out[2])
+  cdef float* vs_out = <float*>(out[3])
+  cdef int* sdim_out = <int*>(out[4])
+  cdef int* info_out = <int*>(out[5])
+
+  cdef float work_query
+  cdef int lwork = -1
+  sgees(&jobvs, &sort, NULL, &n, a_work, &n, sdim, wr_out, wi_out, vs, &n, &work_query, &lwork, NULL, info_out)
+  lwork = <int>(work_query)
+  cdef float* work = <float*> malloc(lwork * sizeof(float))
+
+  for i in range(b):
+    memcpy(a_work, a_in, <int64_t>(n) * <int64_t>(n) * sizeof(float))
+    sgees(&jobvs, &sort, NULL, &n, a_work, &n, sdim, wr_out, wi_out, vs, &n, work, &lwork, NULL, info_out)
+
+    a_in += n * n
+    wr_out += n
+    wi_out += n
+    vs_out += n * n
+    sdim_out += 1
+    info_out += 1
+  free(work)
+
+register_cpu_custom_call_target(b"lapack_sgees", <void*>(lapack_sgeev))
+
+
+def gees(c, a, jobvs=True, sort=True):
+  c = _unpack_builder(c)
+  assert sizeof(int32_t) == sizeof(int)
+
+  a_shape = c.get_shape(a)
+  dtype = a_shape.element_type()
+  dims = a_shape.dimensions()
+  assert len(dims) >= 2
+  m, n = dims[-2:]
+  assert m == n
+  batch_dims = tuple(dims[:-2])
+  num_bd = len(batch_dims)
+  b = 1
+  for d in batch_dims:
+    b *= d
+  layout = (num_bd, num_bd + 1) + tuple(range(num_bd - 1, -1, -1))
+
+  jobvs = ord('V' if jobvs else 'N')
+  sort = ord('S' if sort else 'N')
+
+  if dtype == np.float32:
+    fn = b"lapack_sgees"
+    real = True
+    eigvecs_type = np.complex64
+    workspaces = (Shape.array_shape(np.dtype(np.float32), (n, n), (0, 1)))
+    eigvals = (Shape.array_shape(np.dtype(np.float32), batch_dims + (n,),
+                                 tuple(range(num_bd, -1, -1))),
+               Shape.array_shape(np.dtype(np.float32), batch_dims + (n,),
+                                 tuple(range(num_bd, -1, -1))))
+  else:
+    raise NotImplementedError("Unsupported dtype {}".format(dtype))
+
+  out = _ops.CustomCallWithLayout(
+    c, fn,
+    operands=(_constant_s32_scalar(c, b),
+              _constant_s32_scalar(c, n),
+              _ops.Constant(c, np.uint8(jobvs)),
+              _ops.Constant(c, np.uint8(sort)),
+              a),
+    shape_with_layout=Shape.tuple_shape(workspaces + eigvals + (
+        Shape.array_shape(np.dtype(eigvecs_type), dims, layout),
+        Shape.array_shape(np.dtype(np.int32), batch_dims,
+                          tuple(range(num_bd - 1, -1, -1)))
+        Shape.array_shape(np.dtype(np.int32), batch_dims,
+                          tuple(range(num_bd - 1, -1, -1))))
+    ),
+    operand_shapes_with_layout=(
+        Shape.array_shape(np.dtype(np.int32), (), ()),
+        Shape.array_shape(np.dtype(np.int32), (), ()),
+        Shape.array_shape(np.dtype(np.uint8), (), ()),
+        Shape.array_shape(np.dtype(np.uint8), (), ()),
+        Shape.array_shape(dtype, dims, layout),
+    ))
+  if real:
+    return (_ops.Complex(_ops.GetTupleElement(out, 1),
+                         _ops.GetTupleElement(out, 2)),
+            _ops.GetTupleElement(out, 3),
+            _ops.GetTupleElement(out, 4))
+  else:
+    raise NotImplementedError("Unsupported dtype {}".format(dtype))

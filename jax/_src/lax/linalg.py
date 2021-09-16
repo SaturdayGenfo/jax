@@ -1411,3 +1411,81 @@ def tridiagonal_solve(dl, d, du, b):
     raise ValueError(f'Only f32/f64 are supported, got {t}')
 
   return tridiagonal_solve_p.bind(dl, d, du, b, m=m, n=n, ldb=ldb, t=t)
+
+
+# Schur Decomposition
+
+def schur_impl(operand, *, compute_schur_vectors, sort_eig_vals):
+  return (
+    xla.apply_primitive(schur_p, operand,
+                        compute_schur_vectors=compute_schur_vectors,
+                        sort_eig_vals=sort_eig_vals))
+
+def schur_translation_rule(c, operand, *, compute_left_eigenvectors,
+                         compute_right_eigenvectors):
+  raise NotImplementedError(
+    "Schur decomposition is only implemented on the CPU backend")
+
+def schur_abstract_eval(operand, *, compute_schur_vectors, sort_eig_vals):
+  if isinstance(operand, ShapedArray):
+    if operand.ndim < 2 or operand.shape[-2] != operand.shape[-1]:
+      raise ValueError("Argument to Schur decomposition must have "
+                       "shape [..., n, n], got shape {}".format(operand.shape))
+
+    batch_dims = operand.shape[:-2]
+    n = operand.shape[-1]
+    dtype = np.complex64 if dtypes.finfo(operand.dtype).bits == 32 else np.complex128
+    dtype = dtypes.canonicalize_dtype(dtype)
+    vs = operand.update(shape=batch_dims + (n, n), dtype=dtype)
+    w = operand.update(shape=batch_dims + (n,), dtype=dtype)
+  else:
+    raise NotImplementedError
+
+  output = [w]
+  if compute_schur_vectors:
+    output.append(vs)
+
+  return tuple(output)
+
+_cpu_gees = lapack.gees
+
+def schur_cpu_translation_rule(c, operand, *, compute_schur_vectors, sort_eig_vals):
+  shape = c.get_shape(operand)
+  batch_dims = shape.dimensions()[:-2]
+
+  w, vs, info = _cpu_gees(c, operand, jobvs=compute_schur_vectors, sort=sort_eig_vals)
+
+  ok = xops.Eq(info, xops.ConstantLiteral(c, np.array(0, np.int32)))
+  w = _broadcasting_select(c, xops.Reshape(ok, batch_dims + (1,)), w,
+                           _nan_like(c, w))
+  output = [w]
+
+  if compute_schur_vectors:
+    vs = _broadcasting_select(c, xops.Reshape(ok, batch_dims + (1, 1)), vs,
+                              _nan_like(c, vs))
+    output.append(vs)
+
+  return xops.Tuple(c, output)
+
+def schur_batching_rule(batched_args, batch_dims, *, compute_schur_vectors,
+                      sort_eig_vals):
+  x, = batched_args
+  bd, = batch_dims
+  x = batching.moveaxis(x, bd, 0)
+
+  return (eig_p.bind(x, compute_schur_vectors=compute_schur_vectors,
+                     sort_eig_vals=sort_eig_vals),
+          (0,) * (1 + compute_schur_vectors))
+
+def schur_jvp_rule(primals, tangents, *, compute_schur_vectors, sort_eig_vals):
+  raise NotImplementedError(
+        'The differentiation rules for the Schur factorization have not been implemented.')
+
+schur_p = Primitive('schur')
+schur_p.multiple_results = True
+schur_p.def_impl(schur_impl)
+schur_p.def_abstract_eval(schur_abstract_eval)
+xla.translations[schur_p] = eig_translation_rule
+xla.backend_specific_translations['cpu'][schur_p] = schur_cpu_translation_rule
+batching.primitive_batchers[schur_p] = schur_batching_rule
+ad.primitive_jvps[schur_p] = schur_jvp_rule

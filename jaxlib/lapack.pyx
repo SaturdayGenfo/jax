@@ -1912,7 +1912,7 @@ def gees(c, a, jobvs=True, sort=True):
   if real:
     return (_ops.Complex(_ops.GetTupleElement(out, 1),
                          _ops.GetTupleElement(out, 2)),
-            _ops.GetTupleElement(out, 3),
+            _ops.GetTupleElement(out, 0), _ops.GetTupleElement(out, 3),
             _ops.GetTupleElement(out, 4))
   else:
     raise NotImplementedError("Unsupported dtype {}".format(dtype))

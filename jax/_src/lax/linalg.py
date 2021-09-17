@@ -1421,8 +1421,8 @@ def schur_impl(operand, *, compute_schur_vectors, sort_eig_vals):
                         compute_schur_vectors=compute_schur_vectors,
                         sort_eig_vals=sort_eig_vals))
 
-def schur_translation_rule(c, operand, *, compute_left_eigenvectors,
-                         compute_right_eigenvectors):
+def schur_translation_rule(c, operand, *, compute_schur_vectors,
+                         sort_eig_vals):
   raise NotImplementedError(
     "Schur decomposition is only implemented on the CPU backend")
 
@@ -1453,16 +1453,18 @@ def schur_cpu_translation_rule(c, operand, *, compute_schur_vectors, sort_eig_va
   shape = c.get_shape(operand)
   batch_dims = shape.dimensions()[:-2]
 
-  w, vs, info = _cpu_gees(c, operand, jobvs=compute_schur_vectors, sort=sort_eig_vals)
+  w, T, vs, info = _cpu_gees(c, operand, jobvs=compute_schur_vectors, sort=sort_eig_vals)
 
   ok = xops.Eq(info, xops.ConstantLiteral(c, np.array(0, np.int32)))
   w = _broadcasting_select(c, xops.Reshape(ok, batch_dims + (1,)), w,
                            _nan_like(c, w))
-  output = [w]
-
+  T = _broadcasting_select(c, xops.Reshape(ok, batch_dims + (1, 1)), T,
+                              _nan_like(c, T))
+  output = [w, T]
   if compute_schur_vectors:
     vs = _broadcasting_select(c, xops.Reshape(ok, batch_dims + (1, 1)), vs,
                               _nan_like(c, vs))
+  
     output.append(vs)
 
   return xops.Tuple(c, output)
@@ -1473,9 +1475,9 @@ def schur_batching_rule(batched_args, batch_dims, *, compute_schur_vectors,
   bd, = batch_dims
   x = batching.moveaxis(x, bd, 0)
 
-  return (eig_p.bind(x, compute_schur_vectors=compute_schur_vectors,
+  return (schur_p.bind(x, compute_schur_vectors=compute_schur_vectors,
                      sort_eig_vals=sort_eig_vals),
-          (0,) * (1 + compute_schur_vectors))
+          (0,) * (2 + compute_schur_vectors))
 
 def schur_jvp_rule(primals, tangents, *, compute_schur_vectors, sort_eig_vals):
   raise NotImplementedError(
@@ -1485,7 +1487,7 @@ schur_p = Primitive('schur')
 schur_p.multiple_results = True
 schur_p.def_impl(schur_impl)
 schur_p.def_abstract_eval(schur_abstract_eval)
-xla.translations[schur_p] = eig_translation_rule
+xla.translations[schur_p] = schur_translation_rule
 xla.backend_specific_translations['cpu'][schur_p] = schur_cpu_translation_rule
 batching.primitive_batchers[schur_p] = schur_batching_rule
 ad.primitive_jvps[schur_p] = schur_jvp_rule

@@ -104,6 +104,24 @@ def eigh(a, b=None, lower=True, eigvals_only=False, overwrite_a=False,
   return _eigh(a, b, lower, eigvals_only, eigvals, type)
 
 
+def _schur(a, output):
+    if output != "real":
+        a = jnp.asarray(a, dtype="complex64")
+        T, S = lax_linalg.schur(a)
+        return T, S
+    else:
+        return lax_linalg.schur(a)
+
+
+@_wraps(scipy.linalg.schur)
+def schur(a, output='real', lwork=None, overwrite_a=False, sort=None, check_finite=True):
+    if overwrite_a is not None:
+        raise NotImplementedError("The option to overwrite the input matrix is not implemented.")
+    if sort is not None:
+        raise NotImplementedError("The option to sort is not implemented.")
+    del overwrite_a, sort, check_finite
+    return _schur(a, output)
+
 
 @_wraps(scipy.linalg.inv)
 def inv(a, overwrite_a=False, check_finite=True):

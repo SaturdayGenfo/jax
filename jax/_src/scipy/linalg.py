@@ -114,11 +114,11 @@ def _schur(a, output):
 
 @_wraps(scipy.linalg.schur)
 def schur(a, output='real', lwork=None, overwrite_a=False, sort=None, check_finite=True):
-    if overwrite_a is not None:
+    if overwrite_a:
         raise NotImplementedError("The option to overwrite the input matrix is not implemented.")
     if sort is not None:
         raise NotImplementedError("The option to sort is not implemented.")
-    del overwrite_a, sort, check_finite
+    del check_finite
     return _schur(a, output)
 
 
@@ -264,6 +264,22 @@ def tril(m, k=0):
 @_wraps(scipy.linalg.triu)
 def triu(m, k=0):
   return jnp.triu(m, k)
+
+@jit
+def _sqrtm_triu(T):
+    pass
+
+@jit
+def _sqrtm(A):
+    T, Z = _schur(A)
+    sqrt_T = _sqrtm_triu(T)
+    return jnp.matmul(jnp.matmul(Z, sqrt_T), Z.T)
+
+@wraps(scipy.linalg.sqrtm)
+def sqrtm(A, disp=True, blocksize=1):
+    if blocksize > 1:
+        raise NotImplementedError("Blocked version is not implemented yet.")
+    return _sqrtm(A)
 
 _expm_description = textwrap.dedent("""
 In addition to the original NumPy argument(s) listed below,

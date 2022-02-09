@@ -103,7 +103,7 @@ def eigh(a, b=None, lower=True, eigvals_only=False, overwrite_a=False,
   del overwrite_a, overwrite_b, turbo, check_finite
   return _eigh(a, b, lower, eigvals_only, eigvals, type)
 
-
+@partial(jit, static_argnames=('output',))
 def _schur(a, output):
     if output != "real":
         a = jnp.asarray(a, dtype="complex64")
@@ -111,7 +111,6 @@ def _schur(a, output):
         return T, S
     else:
         return lax_linalg.schur(a)
-
 
 @_wraps(scipy.linalg.schur)
 def schur(a, output='real', lwork=None, overwrite_a=False, sort=None, check_finite=True):

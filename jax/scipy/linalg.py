@@ -22,6 +22,7 @@ from jax._src.scipy.linalg import (
   det as det,
   eigh as eigh,
   eigh_tridiagonal as eigh_tridiagonal,
+  schur as schur,
   expm as expm,
   expm_frechet as expm_frechet,
   inv as inv,
@@ -34,8 +35,7 @@ from jax._src.scipy.linalg import (
   solve_triangular as solve_triangular,
   svd as svd,
   tril as tril,
-  triu as triu,
-  schur as schur
+  triu as triu
 )
 
 from jax._src.lax.polar import (

@@ -23,6 +23,7 @@ from jax._src.scipy.linalg import (
   eigh as eigh,
   eigh_tridiagonal as eigh_tridiagonal,
   schur as schur,
+  sqrtm as sqrtm,
   expm as expm,
   expm_frechet as expm_frechet,
   inv as inv,

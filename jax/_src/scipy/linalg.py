@@ -106,18 +106,18 @@ def eigh(a, b=None, lower=True, eigvals_only=False, overwrite_a=False,
 @partial(jit, static_argnames=('output',))
 def _schur(a, output):
   if output != "real":
-      a = jnp.asarray(a, dtype="complex64")
-      T, S = lax_linalg.schur(a)
-      return T, S
+    a *= complex(1.0, 0)
+    T, S = lax_linalg.schur(a)
+    return T, S
   else:
-      return lax_linalg.schur(a)
+    return lax_linalg.schur(a)
 
 @_wraps(scipy.linalg.schur)
 def schur(a, output='real', lwork=None, overwrite_a=False, sort=None, check_finite=True):
   if overwrite_a:
-      raise NotImplementedError("The option to overwrite the input matrix is not implemented.")
+    raise NotImplementedError("The option to overwrite the input matrix is not implemented.")
   if sort is not None:
-      raise NotImplementedError("The option to sort is not implemented.")
+    raise NotImplementedError("The option to sort is not implemented.")
   del check_finite
   return _schur(a, output)
 
@@ -270,24 +270,37 @@ def _sqrtm_triu(T):
   diag = jnp.sqrt(jnp.diag(T))
   n = diag.size
   U = jnp.diag(diag)
-  sum_prev_cols = jnp.zeros_like(diag)
-  for j in range(n):
-      U.at[:, j].set((T[:, j] - sum_prev_cols)/(diag + U[j, j]))
-      sum_prev_cols.at[:].add(U[j, j]*U[:, j])
+
+  def i_loop(l, data):
+    j, U = data
+    i = j - 1 - l
+    s = lax.fori_loop(i + 1, j, lambda k, val: val + U[i, k] * U[k, j], 0.0)
+    value = jnp.where(T[i, j] == s, 0.0, (T[i, j] - s) / (U[i, i] + U[j, j]))
+    return j, U.at[i, j].set(value)
+
+  def j_loop(j, U):
+    _, U = lax.fori_loop(0, j, i_loop, (j, U))
+    return U
+
+  U = lax.fori_loop(0, n, j_loop, U)
   return U
 
 @jit
 def _sqrtm(A):
-  T, Z = schur(A)
+  T, Z = schur(A, output='complex')
   sqrt_T = _sqrtm_triu(T)
-  return jnp.matmul(jnp.matmul(Z, sqrt_T), Z.T)
+  return jnp.matmul(jnp.matmul(Z, sqrt_T), jnp.conj(Z.T))
 
 @_wraps(scipy.linalg.sqrtm)
 def sqrtm(A, disp=True, blocksize=1):
   if blocksize > 1:
       raise NotImplementedError("Blocked version is not implemented yet.")
   del disp
-  return _sqrtm(A)
+  sqA = _sqrtm(A)
+  if jnp.isreal(sqA).all():
+    sqA = sqA.real
+  return sqA
+
 
 _expm_description = textwrap.dedent("""
 In addition to the original NumPy argument(s) listed below,

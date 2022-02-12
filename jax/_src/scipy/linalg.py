@@ -275,7 +275,8 @@ def _sqrtm_triu(T):
     j, U = data
     i = j - 1 - l
     s = lax.fori_loop(i + 1, j, lambda k, val: val + U[i, k] * U[k, j], 0.0)
-    value = jnp.where(T[i, j] == s, 0.0, (T[i, j] - s) / (U[i, i] + U[j, j]))
+    value = jnp.where(T[i, j] == s, 0.0, 
+                      (T[i, j] - s) / (diag[i] + diag[j]))
     return j, U.at[i, j].set(value)
 
   def j_loop(j, U):
@@ -289,17 +290,25 @@ def _sqrtm_triu(T):
 def _sqrtm(A):
   T, Z = schur(A, output='complex')
   sqrt_T = _sqrtm_triu(T)
-  return jnp.matmul(jnp.matmul(Z, sqrt_T), jnp.conj(Z.T))
+  return Z @ sqrt_T @ jnp.conj(Z.T)
 
-@_wraps(scipy.linalg.sqrtm)
+@_wraps(scipy.linalg.sqrtm, 
+        lax_description="""
+This differs from ``scipy.linalg.sqrtm`` in that the return type of
+``jax.scipy.linalg.sqrtm`` is always ``complex64`` for 32-bit input,
+and ``complex128`` for 64-bit input.
+
+This function implements the complex Schur method described in [A]. It does not use recursive blocking
+to speed up computations as a Sylvester Equation solver is not available yet in JAX.
+
+[A] Björck, Å., & Hammarling, S. (1983). 
+    "A Schur method for the square root of a matrix". Linear algebra and its applications, 52, 127-140.
+""")
 def sqrtm(A, disp=True, blocksize=1):
   if blocksize > 1:
       raise NotImplementedError("Blocked version is not implemented yet.")
   del disp
-  sqA = _sqrtm(A)
-  if jnp.isreal(sqA).all():
-    sqA = sqA.real
-  return sqA
+  return _sqrtm(A)
 
 
 _expm_description = textwrap.dedent("""

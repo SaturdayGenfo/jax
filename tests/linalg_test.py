@@ -1373,6 +1373,60 @@ class ScipyLinalgTest(jtu.JaxTestCase):
         return jsp.linalg.expm(x, upper_triangular=False, max_squarings=16)
       jtu.check_grads(expm, (a,), modes=["fwd", "rev"], order=1, atol=tol,
                       rtol=tol)
+  @parameterized.named_parameters(
+        jtu.cases_from_list({
+            "testcase_name":
+            "_shape={}".format(jtu.format_shape_dtype_string(shape, dtype)),
+            "shape": shape, "dtype": dtype
+        } for shape in [(4, 4), (15, 15), (50, 50), (100, 100)]
+                            for dtype in float_types + complex_types))
+  @jtu.skip_on_devices("gpu", "tpu")
+  def testSqrtmPSDMatrix(self, shape, dtype):
+    # Checks against scipy.linalg.sqrtm when the principal square root
+    # is guaranteed to be unique (i.e no negative real eigenvalue)
+    rng = jtu.rand_default(self.rng())
+    arg = rng(shape, dtype)
+    mat = arg@arg.T
+    if dtype == np.float32 or dtype == np.complex64:
+      tol = 1e-4
+    else:
+      tol = 1e-8
+    self._CheckAgainstNumpy(osp.linalg.sqrtm, jsp.linalg.sqrtm, lambda : [mat], tol=tol, check_dtypes=False)
+    self._CompileAndCheck(jsp.linalg.sqrtm, lambda : [mat])
+  @parameterized.named_parameters(
+        jtu.cases_from_list({
+            "testcase_name":
+            "_shape={}".format(jtu.format_shape_dtype_string(shape, dtype)),
+            "shape": shape, "dtype": dtype
+        } for shape in [(4, 4), (15, 15), (50, 50), (100, 100)]
+                            for dtype in float_types + complex_types))
+  @jtu.skip_on_devices("gpu", "tpu")
+  def testSqrtmGenMatrix(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    arg = rng(shape, dtype)
+    if dtype == np.float32 or dtype == np.complex64:
+      tol = 1e-3
+    else:
+      tol = 1e-8
+    R = jsp.linalg.sqrtm(arg)
+    self.assertAllClose(R@R, arg, atol=tol, check_dtypes=False)
+  @parameterized.named_parameters(
+        jtu.cases_from_list({
+            "testcase_name":
+            "_shape={}".format(jtu.format_shape_dtype_string(shape, dtype)),
+            "shape": shape, "dtype": dtype
+        } for shape in [(4, 4), (15, 15), (50, 50), (100, 100)]
+                            for dtype in float_types + complex_types))
+  @jtu.skip_on_devices("gpu", "tpu")
+  def testSqrtmBatching(self, shape, dtype):
+    rng = jtu.rand_default(self.rng())
+    batch_size = 10
+    shape = (batch_size, ) + shape
+    args = rng(shape, dtype)
+    square = vmap(lambda mat: mat@mat)
+
+    roots = vmap(jsp.linalg.sqrtm)(args)
+    self.assertAllClose(square(roots), args, atol=5e-3, check_dtypes=False)
 
 @jtu.with_config(jax_numpy_rank_promotion='raise')
 class LaxLinalgTest(jtu.JaxTestCase):

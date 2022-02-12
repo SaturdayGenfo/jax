@@ -16,7 +16,7 @@ import enum
 from dataclasses import dataclass
 from functools import partial
 import itertools as it
-from typing import Union, Optional, Callable, Dict, Tuple, TypeVar, Set, FrozenSet
+from typing import Union, Optional, Callable, Dict, Tuple, TypeVar, FrozenSet
 
 import numpy as np
 
@@ -54,13 +54,18 @@ def setnewattr(obj, name, val):
 
 ## Error value data type and functional assert.
 
+Bool = Union[bool, core.Tracer]
+Int = Union[int, core.Tracer]
+
+
 @dataclass(frozen=True)
 class Error:
-  err: Union[bool, core.Tracer]
-  code: Union[int, core.Tracer]
+  err: Bool
+  code: Int
   msgs: Dict[int, str]
 
   def get(self) -> Optional[str]:
+    """Returns error message is error happened, None if no error happened."""
     assert np.shape(self.err) == np.shape(self.code)
     if np.size(self.err) == 1:
       if self.err:
@@ -71,6 +76,12 @@ class Error:
                        for idx, e in np.ndenumerate(self.err) if e) or None
     return None
 
+  def throw(self):
+    """Throw ValueError with error message if error happened."""
+    err = self.get()
+    if err:
+      raise ValueError(err)
+
 register_pytree_node(Error,
                      lambda e: ((e.err, e.code), tuple(sorted(e.msgs.items()))),
                      lambda msgs, data: Error(*data, dict(msgs)))  # type: ignore
@@ -78,9 +89,6 @@ register_pytree_node(Error,
 init_error = Error(False, 0, {})
 next_code = it.count(1).__next__  # globally unique ids, could be uuid4
 
-
-Bool = Union[bool, core.Tracer]
-Int = Union[int, core.Tracer]
 
 def assert_func(error: Error, pred: Bool, msg: str) -> Error:
   code = next_code()
@@ -178,6 +186,49 @@ class CheckifyTrace(core.Trace):
       return (0, 0, *out_axes)
     return (err, code, *vals), (todo, out_axes_transform)
 
+  def process_custom_jvp_call(self, prim, fun, jvp, tracers):
+    in_vals = [t.val for t in tracers]
+    e = popattr(self.main, 'error')
+    msgs = tuple(e.msgs.items())
+    fun, msgs1 = checkify_subtrace(fun, self.main, msgs)
+    jvp, msgs2 = checkify_custom_jvp_subtrace(jvp, self.main, msgs)
+    err, code, *out_vals = prim.bind(fun, jvp, e.err, e.code, *in_vals)
+    fst, out_msgs = lu.merge_linear_aux(msgs1, msgs2)
+    setattr(self.main, 'error', Error(err, code, out_msgs))
+    return [CheckifyTracer(self, x) for x in out_vals]
+
+  def post_process_custom_jvp_call(self, out_tracers, jvp_was_run):
+    if jvp_was_run:
+      msg = ("support for custom_jvp rules which close over checkify values is "
+             "not implemented. If you see this, open an issue at "
+             "https://github.com/google/jax/issues!")
+      raise NotImplementedError(msg)
+    vals = [t.val for t in out_tracers]
+    main = self.main
+    e = popattr(main, 'error')
+    err, code, main.msgs = e.err, e.code, e.msgs
+    def todo(vals):
+      err, code, *vals = vals
+      setnewattr(main, 'error', Error(err, code, popattr(main, 'msgs')))
+      trace = main.with_cur_sublevel()
+      return [CheckifyTracer(trace, x) for x in vals]
+    return (err, code, *vals), todo
+
+  def process_custom_vjp_call(self, prim, fun, fwd, bwd, tracers, out_trees):
+    in_vals = [t.val for t in tracers]
+    e = popattr(self.main, 'error')
+    msgs = tuple(e.msgs.items())
+    fun, msgs1 = checkify_subtrace(fun, self.main, msgs)
+    fwd, msgs2 = checkify_custom_vjp_subtrace(fwd, self.main, msgs)
+    out = prim.bind(fun, fwd, bwd, e.err, e.code, *in_vals, out_trees=out_trees)
+    fst, out_msgs = lu.merge_linear_aux(msgs1, msgs2)
+    if fst:
+      err, code, *out = out
+    else:
+      err, code = e.err, e.code  # forward input error values to output
+    setattr(self.main, 'error', Error(err, code, out_msgs))
+    return [CheckifyTracer(self, x) for x in out]
+
 def _reduce_any_error(errs, codes):
   errs_, codes_ = lax.sort_key_val(errs, codes, dimension=0)
   return errs_[-1], codes_[-1]
@@ -211,6 +262,40 @@ def checkify_subtrace(main, msgs, err, code, *args):
   del main.error
   yield (err, code, *out_vals), msgs
 
+@lu.transformation_with_aux
+def checkify_custom_jvp_subtrace(main, msgs, *args):
+  # Like checkify_subtrace, but used specifically on the custom JVP rules
+  # associated with a custom_jvp. This code is called in the context of a
+  # jvp-of-checkify-of-custom_jvp. It takes both primal and tangent inputs,
+  # flattened into a single args tuple, and similarly must produce flattened
+  # primal and tangent outputs. Both primals and tangents include error values,
+  # but the tangent error values are trivially zero.
+  # The types to have in mind are:
+  #   jvp : (a -> b) -> (a, T a) -> (b, T b)
+  #   checkify : (a -> b) -> a -> Err b
+  #   jvp-of-checkify : (a -> b) -> (a, T a) -> (Err b, T (Err b))
+  # where because Err is a pytree, we necessarily have T (Err b) = Err' (T b)
+  # where the other Err' components are trivial (of float0 dtype).
+  # Semantically, we don't add checks to the JVP rule. To check the result of a
+  # JVP rule, one must instead use checkify-of-jvp. Thus this implementation
+  # just forwards the input error and code (and trivial tangents) to the output.
+  del main
+  n, ragged = divmod(len(args), 2)
+  assert not ragged
+  (err,), (code,), primals = split_list(args[:n], [1, 1])
+  (err_dot,), (code_dot,), tangents = split_list(args[n:], [1, 1])
+  outs = yield (*primals, *tangents), {}
+  m, ragged = divmod(len(outs), 2)
+  assert not ragged
+  out_primals, out_tangents = outs[:m], outs[m:]
+  yield (err, code, *out_primals, err_dot, code_dot, *out_tangents), dict(msgs)
+
+@lu.transformation_with_aux
+def checkify_custom_vjp_subtrace(main, msgs, err, code, *args):
+  # We don't add any checks; just drop input error values.
+  del main, err, code
+  outs = yield args, {}
+  yield outs, dict(msgs)
 
 # TODO take (error_aval, code_aval) instead of error here?
 def checkify_jaxpr(jaxpr, error, enabled_errors):
@@ -229,26 +314,108 @@ def checkify_fun_to_jaxpr(f, error, enabled_errors, in_avals):
 
 ## assert primitive
 
-def assert_(pred: Bool, msg: str) -> None:
+def check(pred: Bool, msg: str) -> None:
+  """Check a predicate, add an error with msg if predicate is False.
+
+  This is an effectful operation, and can't be staged (jitted/scanned/...).
+  Before staging a function with checks, ``checkify`` it!
+
+  Args:
+    pred: if False, an error is added.
+    msg: error message if error is added.
+
+  For example:
+
+    >>> import jax
+    >>> import jax.numpy as jnp
+    >>> from jax.experimental import checkify
+    >>> def f(x):
+    ...   checkify.check(x!=0, "cannot be zero!")
+    ...   return 1/x
+    >>> checked_f = checkify.checkify(f)
+    >>> err, out = jax.jit(checked_f)(0)
+    >>> err.throw()  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+      ...
+    ValueError: cannot be zero! (check failed at ...)
+
+  """
   if not is_scalar_pred(pred):
-    raise TypeError(f"assert_ takes a scalar pred as argument, got {pred}")
+    raise TypeError(f'check takes a scalar pred as argument, got {pred}')
   code = next_code()
-  return assert2_(pred, code, {code: msg})
+  msg += f' (check failed at {summary()})'
+  return check_error(Error(jnp.logical_not(pred), code, {code: msg}))
 
 def is_scalar_pred(pred) -> bool:
   return (isinstance(pred, bool) or
           isinstance(pred, jnp.ndarray) and pred.shape == () and
           pred.dtype == jnp.dtype('bool'))
 
-def assert2_(pred: Bool, code: Int, msgs: Dict[int, str]) -> None:
-  return assert_p.bind(pred, code, msgs=msgs)
+def check_error(error: Error) -> None:
+  """Raise an Exception if ``error`` represents a failure. Functionalized by ``checkify``.
 
-assert_p = core.Primitive('assert')
+  The semantics of this function are equivalent to:
+
+  >>> def check_error(err: Error) -> None:
+  ...   err.throw()  # can raise ValueError
+
+  But unlike that implementation, ``check_error`` can be functionalized using
+  the ``checkify`` transformation.
+
+  This function is similar to ``check`` but with a different signature: whereas
+  ``check`` takes as arguments a boolean predicate and a new error message
+  string, this function takes an ``Error`` value as argument. Both ``check``
+  and this function raise a Python Exception on failure (a side-effect), and
+  thus cannot be staged out by ``jit``, ``pmap``, ``scan``, etc. Both also can
+  be functionalized by using ``checkify``.
+
+  But unlike ``check``, this function is like a direct inverse of ``checkify``:
+  whereas ``checkify`` takes as input a function which can raise a Python
+  Exception and produces a new function without that effect but which produces
+  an ``Error`` value as output, this ``check_error`` function can accept an
+  ``Error`` value as input and can produce the side-effect of raising an
+  Exception. That is, while ``checkify`` goes from functionalizable Exception
+  effect to error value, this ``check_error`` goes from error value to
+  functionalizable Exception effect.
+
+  ``check_error`` is useful when you want to turn checks represented by an
+  ``Error`` value (produced by functionalizing ``checks`` via ``checkify``)
+  back into Python Exceptions.
+
+  Args:
+    error: Error to check.
+
+  For example, you might want to functionalize part of your program through
+  checkify, stage out your functionalized code through ``jit``, then re-inject
+  your error value outside of the ``jit``:
+
+  >>> import jax
+  >>> from jax.experimental import checkify
+  >>> def f(x):
+  ...   checkify.check(x>0, "must be positive!")
+  ...   return x
+  >>> def with_inner_jit(x):
+  ...   checked_f = checkify.checkify(f)
+  ...   # a checkified function can be jitted
+  ...   error, out = jax.jit(checked_f)(x)
+  ...   checkify.check_error(error)
+  ...   return out
+  >>> _ = with_inner_jit(1)  # no failed check
+  >>> with_inner_jit(-1)  # doctest: +IGNORE_EXCEPTION_DETAIL
+  Traceback (most recent call last):
+    ...
+  ValueError: must be positive!
+  >>> # can re-checkify
+  >>> error, _ = checkify.checkify(with_inner_jit)(-1)
+  """
+  return assert_p.bind(~error.err, error.code, msgs=error.msgs)
+
+assert_p = core.Primitive('assert') # TODO: rename to check?
 assert_p.multiple_results = True  # zero results
 
 @assert_p.def_impl
 def assert_impl(pred, code, *, msgs):
-  assert pred, msgs[int(code)]
+  Error(~pred, code, msgs).throw()
   return []
 
 @assert_p.def_abstract_eval
@@ -479,12 +646,13 @@ add_nan_check(lax.conv_general_dilated_p)
 add_nan_check(lax.reduce_max_p)
 add_nan_check(lax.reduce_min_p)
 add_nan_check(lax.abs_p)
-add_nan_check(lax.select_p)
+add_nan_check(lax.select_n_p)
 add_nan_check(lax.max_p)
 add_nan_check(lax.min_p)
 
+
 def assert_discharge_rule(error, enabled_errors, pred, code, *, msgs):
-  if ErrorCategory.ASSERT not in enabled_errors:
+  if ErrorCategory.USER_CHECK not in enabled_errors:
     return [], error
 
   out_err = error.err | jnp.logical_not(pred)
@@ -495,16 +663,78 @@ error_checks[assert_p] = assert_discharge_rule
 
 ## checkify api
 
-ErrorCategory = enum.Enum('ErrorCategory', ['NAN', 'OOB', 'DIV', 'ASSERT'])
+ErrorCategory = enum.Enum('ErrorCategory', ['NAN', 'OOB', 'DIV', 'USER_CHECK'])
 
-float_errors = {ErrorCategory.NAN, ErrorCategory.DIV}
-index_errors = {ErrorCategory.OOB}
-automatic_errors = float_errors | index_errors
-user_asserts = {ErrorCategory.ASSERT}
+user_checks = frozenset({ErrorCategory.USER_CHECK})
+nan_checks = frozenset({ErrorCategory.NAN})
+index_checks = frozenset({ErrorCategory.OOB})
+div_checks = frozenset({ErrorCategory.DIV})
+float_checks = nan_checks | div_checks
+automatic_checks = float_checks | index_checks
+all_checks = automatic_checks | user_checks
 
 Out = TypeVar('Out')
-def checkify(fun: Callable[..., Out], errors: Set[ErrorCategory] = user_asserts
+
+
+def checkify(fun: Callable[..., Out],
+             errors: FrozenSet[ErrorCategory] = user_checks
              ) -> Callable[..., Tuple[Error, Out]]:
+  """Functionalize `check` calls in `fun`, and optionally add run-time error checks.
+
+  Run-time errors are either user-added ``checkify.check`` assertions, or
+  automatically added checks like NaN checks, depending on the ``errors``
+  argument.
+
+  The returned function will return an Error object `err` along with the output
+  of the original function. ``err.get()`` will either return ``None`` (if no
+  error occurred) or a string containing an error message. This error message
+  will correspond to the first error which occurred. ``err.throw()`` will raise
+  a ValueError with the error message if an error occurred.
+
+  By default only user-added ``checkify.check`` assertions are enabled. You can
+  enable automatic checks through the ``errors`` argument.
+
+  The automatic check sets which can be enabled, and when an error is generated:
+    - ``user_checks``: a ``checkify.check`` evaluated to False.
+    - ``nan_checks``: a floating-point operation generated a NaN value
+      as output.
+    - ``div_checks``: a division by zero.
+    - ``index_checks``: an index was out-of-bounds.
+
+  Multiple categories can be enabled together by creating a `Set` (eg.
+  ``errors={ErrorCategory.NAN, ErrorCategory.OOB}``). Multiple sets can be
+  re-combined (eg. ``errors=float_checks|user_checks``)
+
+  Args:
+    fun: Callable which can contain user checks (see ``check``).
+    errors: A set of ErrorCategory values which defines the set of enabled
+      checks. By default only explicit ``checks`` are enabled
+      (``user_checks``). You can also for example enable NAN and
+      DIV errors by passing the ``float_checks`` set, or for
+      example combine multiple sets through set operations
+      (``float_checks | user_checks``)
+  Returns:
+    A function which accepts the same arguments as ``fun`` and returns as output
+    a pair where the first element is an ``Error`` value, representing the first
+    failed ``check``, and the second element is the original output of ``fun``.
+
+  For example:
+
+    >>> import jax
+    >>> import jax.numpy as jnp
+    >>> from jax.experimental import checkify
+    >>>
+    >>> @jax.jit
+    ... def f(x):
+    ...   y = jnp.sin(x)
+    ...   return x+y
+    >>> err, out = checkify.checkify(f, errors=checkify.float_checks)(jnp.inf)
+    >>> err.throw()  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+      ...
+    ValueError: nan generated by primitive sin
+
+  """
   if not errors:
     raise ValueError('Checkify needs to be called with at least one enabled'
                      ' ErrorCategory, was called with an empty errors set.')
@@ -513,7 +743,7 @@ def checkify(fun: Callable[..., Out], errors: Set[ErrorCategory] = user_asserts
   def checked_fun(*args, **kwargs):
     args_flat, in_tree = tree_flatten((args, kwargs))
     f, out_tree = flatten_fun(lu.wrap_init(fun), in_tree)
-    (err, code, out_flat), msgs = checkify_flat(f, frozenset(errors), *args_flat)
+    (err, code, out_flat), msgs = checkify_flat(f, errors, *args_flat)
     out = tree_unflatten(out_tree(), out_flat)
     return Error(err, code, msgs), out
   return checked_fun

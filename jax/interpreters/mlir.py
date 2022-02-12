@@ -39,7 +39,6 @@ from jax._src.lib.mlir.dialects import chlo
 from jax._src.lib.mlir.dialects import mhlo
 from jax._src.lib.mlir.dialects import std
 from jax._src.lib import xla_client as xc
-import jax._src.pretty_printer as pp
 from jax._src import source_info_util
 import jax._src.util as util
 import jax.interpreters.ad as ad
@@ -266,9 +265,7 @@ def _source_info_to_location(
     primitive: core.Primitive, params: Dict,
     source_info: source_info_util.SourceInfo,
     name_stack: str = "") -> ir.Location:
-  eqn_str = str(
-      pp.text(name_stack) +
-      core.pp_eqn_compact(primitive.name, params, core.JaxprPpContext()))
+  eqn_str = name_stack + core.str_eqn_compact(primitive.name, params)
   frame = source_info_util.user_frame(source_info)
   if frame is None:
     loc = ir.Location.unknown()
@@ -423,6 +420,11 @@ def module_to_string(module: ir.Module) -> str:
 
 def _set_up_aliases(avals_in, avals_out, donated_args):
   input_output_aliases = [None] * len(avals_in)
+  # To match-up in-avals to out-avals we only care about the number of
+  # bytes, so we strip off unrelated aval metadata (eg. the named shape)
+  strip_metadata = lambda a: a.strip_named_shape().strip_weak_type()
+  avals_in = map(strip_metadata, avals_in)
+  avals_out = map(strip_metadata, avals_out)
 
   donations = collections.defaultdict(collections.deque)
   for i, (aval, donated) in enumerate(zip(avals_in, donated_args)):

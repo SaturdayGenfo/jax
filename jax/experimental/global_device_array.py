@@ -209,6 +209,8 @@ class GlobalDeviceArray:
   Attributes:
     shape : Global shape of the array.
     dtype : Dtype of the global array.
+    ndim : Number of array dimensions in the global shape.
+    size: Number of elements in the global array.
     local_shards : List of :class:`Shard` on the local devices of the current process.
       Data is materialized for all local shards.
     global_shards : List of all :class:`Shard` of the global array. Data isn’t
@@ -270,7 +272,13 @@ class GlobalDeviceArray:
       self._local_devices = self._global_mesh.local_devices
     else:
       self._local_devices = self._gda_fast_path_args.local_devices
-    assert len(device_buffers) == len(self._local_devices)
+
+    for db, ld in safe_zip(device_buffers, self._local_devices):
+      if db.device() != ld:
+        raise ValueError(
+            "The `global_mesh.local_devices` and `device_buffers` device order "
+            "doesn't match. Please use `global_mesh.local_devices` to put "
+            "arrays on devices instead of `jax.local_devices()`")
 
     self._local_shards = self._create_local_shards()
 
@@ -305,6 +313,14 @@ class GlobalDeviceArray:
   @property
   def shape(self) -> Shape:
     return self._global_shape
+
+  @property
+  def ndim(self):
+    return len(self.shape)
+
+  @property
+  def size(self):
+    return prod(self.shape)
 
   @property
   def is_fully_replicated(self) -> bool:

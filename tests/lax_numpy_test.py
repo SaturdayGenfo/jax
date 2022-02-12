@@ -492,13 +492,12 @@ def _dtypes_are_compatible_for_bitwise_ops(args):
       or (width(x) == 32 and width(y) == 64 and is_signed(y)))
 
 def _shapes_are_broadcast_compatible(shapes):
-  accumulator = np.zeros([])
-  for shape in shapes:
-    try:
-      accumulator = accumulator + np.zeros(shape)
-    except ValueError:
-      return False
-  return True
+  try:
+    lax.broadcast_shapes(*(() if s in scalar_shapes else s for s in shapes))
+  except ValueError:
+    return False
+  else:
+    return True
 
 def _shapes_are_equal_length(shapes):
   return all(len(shape) == len(shapes[0]) for shape in shapes[1:])
@@ -4595,10 +4594,14 @@ class LaxBackedNumpyTests(jtu.JaxTestCase):
         for a_shape, axis in (
           ((7,), None),
           ((47, 7), 0),
+          ((47, 7), ()),
           ((4, 101), 1),
+          ((4, 47, 7), (1, 2)),
+          ((4, 47, 7), (0, 2)),
+          ((4, 47, 7), (1, 0, 2)),
         )
         for q_dtype in [np.float32]
-        for q_shape in scalar_shapes + [(4,)]
+        for q_shape in scalar_shapes + [(1,), (4,)]
         for keepdims in [False, True]
         for method in ['linear', 'lower', 'higher', 'nearest', 'midpoint']))
   def testQuantile(self, op, a_rng, q_rng, a_shape, a_dtype, q_shape, q_dtype,

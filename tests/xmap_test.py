@@ -210,7 +210,6 @@ def schedules(sizes: Dict[str, int]
           yield axis_resources, mesh_data
 
 
-@jtu.with_config(jax_numpy_rank_promotion="raise")
 class XMapTestCase(jtu.BufferDonationTestCase):
   pass
 
@@ -660,10 +659,9 @@ class XMapTest(XMapTestCase):
         "called with:\n.*int32.*",
         lambda: f_exe(x_i32))
 
-  def testNewCheckpointError(self):
+  def testNewCheckpoint(self):
     f = checkpoint(xmap(lambda x: x, in_axes=['i', ...], out_axes=['i', ...]))
-    with self.assertRaisesRegex(NotImplementedError, 'xmap'):
-      jax.grad(f)(jnp.arange(3.))
+    self.assertAllClose(jax.grad(lambda x: f(x).sum())(jnp.arange(3.)), jnp.ones(3))
 
 
 class XMapTestSPMD(SPMDTestMixin, XMapTest):
@@ -1178,7 +1176,6 @@ class PDotTests(XMapTestCase):
     self.assertAllClose(out, expected, check_dtypes=True)
 
 
-@jtu.with_config(jax_numpy_rank_promotion="raise")
 class XMapErrorTest(jtu.JaxTestCase):
 
   @jtu.with_mesh([('x', 2)])
@@ -1410,7 +1407,6 @@ class XMapErrorTest(jtu.JaxTestCase):
       xmap(lambda x: x, (p,), (p, ['x']))([x, x, x])  # Error, we raise a generic tree mismatch message
 
 
-@jtu.with_config(jax_numpy_rank_promotion="raise")
 class NamedAutodiffTests(jtu.JaxTestCase):
 
   def testVjpReduceAxes(self):

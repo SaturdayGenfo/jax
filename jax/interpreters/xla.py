@@ -374,6 +374,8 @@ for t in device_array.device_array_types:
   register_constant_handler(t, _device_array_constant_handler)
 
 
+register_constant_handler(core.Token, lambda c, _, __: [xops.CreateToken(c)])
+
 # TODO(mattjj): try to remove this canonicalize_dtype stuff
 def canonicalize_dtype(x):
   typ = type(x)
@@ -802,22 +804,21 @@ def lower_jaxpr_to_xla_module(
   return c.build(output)
 
 
-
 xla_call_p: core.CallPrimitive = core.CallPrimitive('xla_call')
 xla_call = xla_call_p.bind
 
-def _xla_call_partial_eval_update_params(params, in_unknowns):
-  call_jaxpr = params['call_jaxpr']
+def _xla_call_partial_eval_update_params(params, kept_inputs, num_new_inputs):
   donated_invars = params['donated_invars']
-  if not in_unknowns and donated_invars:
+  if not kept_inputs and donated_invars:
     # JaxprTrace.post_process_call creates a call with no input tracers
-    new_donated_invars = (False,) * len(call_jaxpr.invars)
+    donated_invars = (False,) * num_new_inputs
   else:
+    assert len(kept_inputs) == len(donated_invars)
     # JaxprTrace.process_call drops known input tracers
-    donated_invars = [d for d, uk in zip(donated_invars, in_unknowns) if uk]
-    new_donated_invars = ((False,) * (len(call_jaxpr.invars) - len(donated_invars))
-                          + tuple(donated_invars))
-  return dict(params, donated_invars=new_donated_invars)
+    donated_invars = [d for d, kept in zip(donated_invars, kept_inputs) if kept]
+    # Any new inputs are prepended to the left, so mark those as not donated.
+    donated_invars = [False] * num_new_inputs + donated_invars
+  return dict(params, donated_invars=tuple(donated_invars))
 pe.call_param_updaters[xla_call_p] = _xla_call_partial_eval_update_params
 
 def _xla_call_jvp_update_params(params, nz_tangents, nz_tangents_out_thunk):
@@ -858,7 +859,9 @@ ad.primitive_transposes[xla_call_p] = partial(ad.call_transpose, xla_call_p)
 
 
 def _xla_call_partial_eval_custom_params_updater(
-    unks_in: List[bool], num_res: int, params_known: dict, params_staged: dict
+    unks_in: Sequence[bool],
+    kept_outs_known: Sequence[bool], kept_outs_staged: Sequence[bool],
+    num_res: int, params_known: dict, params_staged: dict
   ) -> Tuple[dict, dict]:
   # pruned inputs to jaxpr_known according to unks_in, so prune donated_invars
   donated_invars_known, _ = partition_list(unks_in, params_known['donated_invars'])
